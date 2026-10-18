@@ -45,7 +45,7 @@ function buildFlagGrid() {
   $('#screen-country [data-back]').dataset.back = creativeMode ? 'screen-menu' : 'screen-diff';
   $('#screen-country h2').textContent = creativeMode ? 'Творческий режим — выберите страну' : 'Выберите страну';
   filterGrid('');
-  $$('.flag-card').forEach(card => card.classList.toggle('taken', MP.role === 'guest' && card.dataset.iso === MP.hostIso));
+  $$('.flag-card').forEach(card => card.classList.toggle('taken', MP.role === 'guest' && MP.taken.includes(card.dataset.iso)));
   setTimeout(() => $('#country-search').focus(), 50);
 }
 function filterGrid(q) { q = q.trim().toLowerCase(); $$('.flag-card').forEach(c => (c.style.display = !q || c.dataset.q.includes(q) ? '' : 'none')); }
@@ -156,18 +156,19 @@ const owner = new Uint16Array(NCELL);
 let C = [];          // страны (по индексу)
 let G = null;        // состояние игры
 let PL = -1;         // индекс страны игрока (-1 — наблюдатель)
-// Сетевая игра: role — 'host' (считает мир) или 'guest' (друг); guestPL — страна друга на стороне хоста
-const MP = { role: null, peer: null, conn: null, code: '', guestPL: -1, hostPL: -1, cellBuf: [], warsSig: '', flagSent: {}, pendingHost: false, ready: false, hostIso: '' };
+// Сетевая игра: role — 'host' (считает мир) или 'guest' (друг); guests — подключённые друзья (до двух) на стороне хоста
+const MP = { role: null, peer: null, conn: null, code: '', guests: [], maxGuests: 1, humans: [], cellBuf: [], warsSig: '', flagSent: {},
+  pendingHost: false, live: false, waiting: false, taken: [], humansTotal: 0 };
 let swapDepth = 0, swapKeep = -1, deferRecolor = false;
-const isHuman = ix => ix >= 0 && (ix === (swapDepth ? swapKeep : PL) || (MP.role === 'host' && ix === MP.guestPL));
+const isHuman = ix => ix >= 0 && (ix === (swapDepth ? swapKeep : PL) || (MP.role === 'host' && MP.guests.some(g => g.pl === ix)));
 // выполнить код «от лица» другого живого игрока (для приказов друга и сообщений ему)
 function asPlayer(h, fn) {
   if (h === PL) return fn();
-  const keep = PL;
+  const keep = PL, g = MP.guests.find(x => x.pl === h);
   if (!swapDepth) swapKeep = keep;
   swapDepth++; PL = h;
   try { return fn(); } finally {
-    if (MP.guestPL === h) MP.guestPL = PL; // друг мог сменить страну (независимость) или уйти
+    if (g) g.pl = PL; // друг мог сменить страну (независимость) или уйти
     PL = keep; swapDepth--;
     if (!swapDepth && deferRecolor) { deferRecolor = false; recolorAll(); }
     hudDirty = true;
@@ -175,7 +176,7 @@ function asPlayer(h, fn) {
 }
 function forHumans(fn) {
   const list = [PL];
-  if (MP.role === 'host' && MP.guestPL >= 0 && MP.guestPL !== PL) list.push(MP.guestPL);
+  if (MP.role === 'host') for (const g of MP.guests) if (g.pl >= 0 && g.pl !== PL) list.push(g.pl);
   for (const h of list) if (h >= 0 && C[h] && C[h].alive) asPlayer(h, () => fn(h));
 }
 const enemyM = new Uint8Array(CAP * CAP);
@@ -293,7 +294,7 @@ function setOwner(i, n, quiet) {
   const o = owner[i];
   if (o === n || o === SEA) return;
   owner[i] = n;
-  if (MP.ready) MP.cellBuf.push(i, n);
+  if (MP.live) MP.cellBuf.push(i, n);
   const co = C[o], cn = C[n], pp = provDens[provOf[i]];
   co.cells--; cn.cells++; co.pop -= pp; cn.pop += pp;
   colorCell(i);
@@ -426,15 +427,10 @@ function eliminate(ix) {
   for (const al of G.alliances) al.members.delete(ix);
   toast(`Страна <b>${esc(c.name)}</b> перестала существовать`, 'war', [ix]);
   if (!warsTimer) warsTimer = setTimeout(() => { warsTimer = 0; warsChanged(); }, 0);
-  if (MP.role === 'host' && ix === MP.guestPL) {
-    mpSend({ t: 'gameover', win: false });
-    MP.guestPL = -1;
-    if (PL >= 0) setTimeout(() => gameOverModal(true), 60);
-  }
-  if (ix === PL && MP.ready) {
-    mpSend({ t: 'gameover', win: true });
+  const mpGame = MP.role === 'host' && MP.humansTotal >= 2;
+  if (MP.role === 'host') mpOnEliminated(ix);
+  if (ix === PL && mpGame) {
     PL = -1;
-    setTimeout(() => gameOverModal(false), 60);
   } else if (ix === PL) {
     PL = -1;
     setTimeout(() => modal(`<h2>Ваша страна пала</h2><p>${esc(c.name)} больше не существует. Можно наблюдать за миром или вернуться в меню.</p>
@@ -698,7 +694,7 @@ function humanDiplomacy(isHost) {
     }
   }
   // ИИ сам предлагает союз игроку
-  if (isHost && !MP.ready && !G.modalOpen && !cosmic() && chance((C[PL].enemies ? 0.005 : 0.0015))) {
+  if (isHost && !MP.live && !G.modalOpen && !cosmic() && chance((C[PL].enemies ? 0.005 : 0.0015))) {
     const cands = C.filter(c => c.alive && c.ix !== PL && !allied(c.ix, PL) && !atWar(c.ix, PL) && !rivalsBloc(c.ix, PL)
       && (neighborsOf(PL).has(c.ix) || [...Array(C.length).keys()].some(e => atWar(e, PL) && atWar(e, c.ix))));
     if (cands.length) {
@@ -1324,7 +1320,7 @@ const ARROW_COL = { mine: '#ffd23f', enemy: '#ff3b2f', other: 'rgba(255,255,255,
 function ping(xy, color, icon) {
   if (!G || !xy) return;
   G.pings.push({ x: xy[0], y: xy[1], t: 0, color, icon });
-  if (MP.role === 'host' && MP.ready) mpSend({ t: 'ping', xy, color, icon });
+  if (MP.live) mpBroadcast({ t: 'ping', xy, color, icon });
 }
 let lastFrame = performance.now(), lastLabels = 0, lastArrows = 0;
 let hudDirty = false, lastHud = 0, needDraw = true, lastDraw = 0;
@@ -1457,7 +1453,7 @@ requestAnimationFrame(frame);
 let acc = 0, last = Date.now(), lastCosmic = 0;
 setInterval(() => {
   const now = Date.now(), dt = Math.min(now - last, 2000); last = now;
-  if (G && MP.role !== 'guest' && !G.paused && (!G.modalPause || MP.ready) && $('#screen-game').classList.contains('active')) {
+  if (G && MP.role !== 'guest' && !G.paused && (!G.modalPause || MP.live) && !MP.waiting && $('#screen-game').classList.contains('active')) {
     const days = G.speed > 100 ? dt * G.speed / 1000 : Math.min(dt * G.speed / 1000, 20);
     simulate(Math.min(days, 25));
     adjStep(48);
@@ -1516,9 +1512,9 @@ function flagTag(ix, cls = 'tiny') { const c = C[ix]; return c ? `<img class="fl
 function fixFlags(rootEl) { rootEl.querySelectorAll('img[data-flag]').forEach(img => setFlagImg(img, C[+img.dataset.flag])); }
 
 function oppTag() {
-  const o = MP.role === 'host' ? MP.guestPL : MP.role === 'guest' ? MP.hostPL : -1;
-  if (MP.role === 'host' && !MP.ready) return '<span>👥 <b>ждём друга…</b></span>';
-  return o >= 0 && C[o] ? `<span>👥 Друг: ${flagTag(o)} <b>${esc(C[o].name)}</b></span>` : '';
+  if (MP.role === 'host' && MP.waiting) return `<span>👥 <b>ждём друзей (${MP.guests.filter(g => g.ready).length}/${MP.maxGuests})…</b></span>`;
+  const list = (MP.role === 'host' ? humanPls() : MP.role === 'guest' ? MP.humans : []).filter(h => h !== PL && C[h]);
+  return list.length ? `<span>👥 Соперники: ${list.map(h => `${flagTag(h)} <b>${esc(C[h].name)}</b>${C[h].alive ? '' : ' ✝'}`).join(', ')}</span>` : '';
 }
 function renderHud() {
   if (swapDepth) { hudDirty = true; return; }
@@ -1552,12 +1548,12 @@ const toastBox = $('#toasts');
 let lastToast = 0;
 function toast(html, kind = '', flags = []) {
   if (!G) return;
-  if (MP.role === 'host' && MP.ready) mpSend({ t: 'toast', html, kind, flags });
+  if (MP.live) mpBroadcast({ t: 'toast', html, kind, flags });
   showToast(html, kind, flags);
 }
 function say(html, kind = '', flags = []) {
   if (!G) return;
-  if (MP.role === 'host' && swapDepth && PL === MP.guestPL) return mpSend({ t: 'toast', html, kind, flags });
+  if (MP.role === 'host' && swapDepth && guestByPl(PL)) return sendTo(guestByPl(PL), { t: 'toast', html, kind, flags });
   showToast(html, kind, flags);
 }
 function showToast(html, kind = '', flags = []) {
@@ -1728,7 +1724,7 @@ function declareIndependence(pid, name, flag, play, auto) {
 
 // ======================= Модальные окна =======================
 function modal(html, actions = {}, after) {
-  if (MP.role === 'host' && swapDepth && PL === MP.guestPL) return mpSend({ t: 'modal', html });
+  if (MP.role === 'host' && swapDepth && guestByPl(PL)) return sendTo(guestByPl(PL), { t: 'modal', html });
   $('#modal-card').innerHTML = html;
   fixFlags($('#modal-card'));
   $('#modal').classList.remove('hidden');
@@ -1806,9 +1802,9 @@ $('#btn-leave').onclick = () => {
   { leave: () => { setMode(null); act('leave'); } });
 };
 
-// ======================= Игра с другом по сети =======================
-// Хост считает весь мир и шлёт другу изменения; друг присылает свои приказы.
-// Соединение — напрямую между браузерами (WebRTC через PeerJS).
+// ======================= Игра с друзьями по сети =======================
+// Хост считает весь мир и шлёт друзьям (до двух) изменения; друзья присылают свои приказы.
+// Соединение — напрямую между браузерами (WebRTC через PeerJS). Каждый сам за себя.
 const PEER_PREFIX = 'countryfail-2026-';
 // PeerJS может прислать буфер как ArrayBuffer или как Uint8Array-представление с отступом
 function asBuf(x) {
@@ -1816,12 +1812,19 @@ function asBuf(x) {
   if (ArrayBuffer.isView(x)) return x.buffer.slice(x.byteOffset, x.byteOffset + x.byteLength);
   return new Uint8Array(x).buffer;
 }
-function mpSend(msg) { if (MP.conn && MP.conn.open) try { MP.conn.send(msg); } catch (e) { console.warn(e); } }
+function sendTo(g, msg) { if (g && g.conn && g.conn.open) try { g.conn.send(msg); } catch (e) { console.warn(e); } }
+function mpBroadcast(msg) { for (const g of MP.guests) if (g.ready) sendTo(g, msg); }
+function mpSend(msg) { if (MP.role === 'guest') sendTo({ conn: MP.conn }, msg); else mpBroadcast(msg); }
+const guestByPl = pl => MP.guests.find(g => g.pl === pl && pl >= 0);
+const humanPls = () => [PL, ...MP.guests.map(g => g.pl)].filter(x => x >= 0);
+function mpRefresh() { MP.live = MP.role === 'host' && MP.guests.some(g => g.ready); }
 function mpCode() { const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s = ''; for (let i = 0; i < 5; i++) s += A[(Math.random() * A.length) | 0]; return s; }
 function mpReset() {
   try { MP.conn && MP.conn.close(); } catch (e) {}
+  for (const g of MP.guests) try { g.conn.close(); } catch (e) {}
   try { MP.peer && MP.peer.destroy(); } catch (e) {}
-  Object.assign(MP, { role: null, peer: null, conn: null, code: '', guestPL: -1, hostPL: -1, cellBuf: [], warsSig: '', flagSent: {}, pendingHost: false, ready: false, hostIso: '' });
+  Object.assign(MP, { role: null, peer: null, conn: null, code: '', guests: [], maxGuests: 1, humans: [], cellBuf: [], warsSig: '',
+    flagSent: {}, pendingHost: false, live: false, waiting: false, taken: [], humansTotal: 0 });
 }
 const mpStatus = t => ($('#mp-status').textContent = t);
 
@@ -1838,7 +1841,17 @@ const ACTIONS = {
   order: pid => { G.orders[PL] = pid; computeArrows(); say(`Войска выдвигаются к городу <b>${esc(P[pid].name)}</b>`, 'good'); },
   cancelOrder: () => { delete G.orders[PL]; computeArrows(); },
   flight: (pid, kind) => playerFlight(pid, kind),
-  alliance: t => proposeAlliance(t),
+  alliance: t => {
+    // союз с живым игроком — по его согласию
+    const g = guestByPl(t);
+    if (g || (t !== PL && isHuman(t))) return askAlliance(PL, t);
+    proposeAlliance(t);
+  },
+  allianceAnswer: (from, yes) => {
+    if (!C[from] || !C[from].alive) return;
+    if (yes) formAlliance(from);
+    else toast(`<b>${esc(C[PL].name)}</b> отказывается от союза с ${esc(C[from].name)}`, 'war', [PL, from]);
+  },
   breakAlliance: t => breakAlliance(t),
   aid: (t, on) => {
     if (on) { C[t].aidFrom.add(PL); say(`Вы помогаете оружием стране <b>${esc(C[t].name)}</b>`, 'good', [t]); }
@@ -1865,19 +1878,20 @@ function act(name, ...args) {
   ACTIONS[name](...args);
 }
 
-// ---------- мир между двумя живыми игроками — с согласия второго ----------
+// ---------- предложение живому игроку (мир / союз) — решает он сам ----------
+function offerTo(toIx, msg, hostModalHtml, onYes, onNo) {
+  const g = guestByPl(toIx);
+  if (g) return sendTo(g, msg);
+  // адресат — хост: показываем окно после выхода из «чужого» хода
+  setTimeout(() => modal(hostModalHtml, { yes: onYes, no: onNo }), 0);
+}
 function askPeace(w, fromIx, toIx) {
-  if (toIx === MP.guestPL && MP.role === 'host') {
-    mpSend({ t: 'peaceOffer', id: w.id, from: C[fromIx].name, fromIx });
-    say(`Предложение мира отправлено другу (${esc(C[toIx].name)})`, '', [toIx]);
-  } else {
-    // предложение пришло хосту от друга — показываем после выхода из «чужого» хода
-    setTimeout(() => modal(`<h2>🕊 Предложение мира</h2><div class="center">${flagTag(fromIx, 'big')}</div>
-      <p>Друг (<b>${esc(C[fromIx].name)}</b>) предлагает заключить мир.</p>
+  offerTo(toIx, { t: 'peaceOffer', id: w.id, from: C[fromIx].name, fromIx },
+    `<h2>🕊 Предложение мира</h2><div class="center">${flagTag(fromIx, 'big')}</div>
+      <p>Игрок (<b>${esc(C[fromIx].name)}</b>) предлагает заключить мир.</p>
       <div class="actions"><button class="btn" data-a="no">Отказать</button><button class="btn" data-a="yes">Заключить мир</button></div>`,
-    { yes: () => answerPeace(w.id, true), no: () => answerPeace(w.id, false) }), 0);
-    say('Предложение мира отправлено другу');
-  }
+    () => answerPeace(w.id, true), () => answerPeace(w.id, false));
+  say(`Предложение мира отправлено игроку (${esc(C[toIx].name)})`, '', [toIx]);
 }
 function answerPeace(id, yes) {
   const w = G.wars.find(x => x.id === id);
@@ -1885,94 +1899,143 @@ function answerPeace(id, yes) {
   if (yes) endWar(w, `🕊 Игроки заключили мир: <b>${esc(w.name)}</b>`);
   else toast(`<b>${esc(C[PL].name)}</b> отвергает мир — война продолжается!`, 'war', [PL]);
 }
+function askAlliance(fromIx, toIx) {
+  offerTo(toIx, { t: 'allianceOffer', from: C[fromIx].name, fromIx },
+    `<h2>🤝 Предложение союза</h2><div class="center">${flagTag(fromIx, 'big')}</div>
+      <p>Игрок (<b>${esc(C[fromIx].name)}</b>) предлагает военный союз против остальных.</p>
+      <div class="actions"><button class="btn" data-a="no">Отказать</button><button class="btn" data-a="yes">Принять союз</button></div>`,
+    () => ACTIONS.allianceAnswer(fromIx, true), () => ACTIONS.allianceAnswer(fromIx, false));
+  say(`Предложение союза отправлено игроку (${esc(C[toIx].name)})`, '', [toIx]);
+}
+
+// ---------- конец игры: побеждает последний выживший игрок ----------
+function mpOnEliminated(ix) {
+  if (MP.role !== 'host' || MP.humansTotal < 2) return;
+  const g = guestByPl(ix);
+  if (g) { sendTo(g, { t: 'gameover', win: false }); g.pl = -1; }
+  if (ix === PL) setTimeout(() => gameOverModal(false), 60);
+  const alive = humanPls().filter(h => h !== ix && C[h].alive);
+  if (alive.length === 1 && !MP.winnerSent) {
+    MP.winnerSent = true;
+    const wg = guestByPl(alive[0]);
+    if (wg) sendTo(wg, { t: 'gameover', win: true });
+    else setTimeout(() => gameOverModal(true), 80);
+    toast(`🏆 Победитель: <b>${esc(C[alive[0]].name)}</b> — последний выживший игрок!`, 'good', [alive[0]]);
+  }
+}
 
 // ---------- сериализация ----------
 const NUMF = ['cells', 'pop', 'cities', 'morale', 'popF', 'econ', 'epiUntil', 'aid', 'capProv', 'overlord', 'strMul', 'bomb'];
 function serWars() { return G.wars.map(w => ({ id: w.id, name: w.name, start: w.start, leaders: w.leaders, sides: [[...w.sides[0]], [...w.sides[1]]] })); }
 function serMeta(allFlags) {
   const flags = {};
-  for (const c of C) if (allFlags || (c.flagVer || 0) !== (MP.flagSent[c.ix] || 0)) { flags[c.ix] = c.flag; MP.flagSent[c.ix] = c.flagVer || 0; }
+  for (const c of C) {
+    if (allFlags) flags[c.ix] = c.flag;
+    else if ((c.flagVer || 0) !== (MP.flagSent[c.ix] || 0)) { flags[c.ix] = c.flag; MP.flagSent[c.ix] = c.flagVer || 0; }
+  }
   return {
     t: 'meta', flags,
     list: C.map(c => [c.id, c.name, c.color, c.leader, c.currency, c.cont, c.pc, c.gdpPc, c.breakFrom == null ? -1 : c.breakFrom, [...c.aidFrom], c.empire ? 1 : 0]),
     alliances: G.alliances.map(a => [a.name, [...a.members], a.mine ? 1 : 0]),
   };
 }
-function serState() {
+function serState(forceWars) {
   const num = new Float64Array(C.length * (NUMF.length + 1));
   C.forEach((c, i) => { const b = i * (NUMF.length + 1); NUMF.forEach((f, k) => (num[b + k] = +c[f] || 0)); num[b + NUMF.length] = c.alive ? 1 : 0; });
   const st = {
-    t: 'state', dayN: G.dayN, date: [G.day.getFullYear(), G.day.getMonth(), G.day.getDate()], speed: G.speed, paused: G.paused || !!G.modalPause && !MP.conn,
-    growth: G.growth, guestPL: MP.guestPL, hostPL: PL, n: C.length, num: num.buffer,
+    t: 'state', dayN: G.dayN, date: [G.day.getFullYear(), G.day.getMonth(), G.day.getDate()], speed: G.speed,
+    paused: G.paused || MP.waiting, growth: G.growth, humans: humanPls(), n: C.length, num: num.buffer,
     flights: G.flights.map(f => [f.by, f.from, f.to, f.target, f.kind, f.t]), orders: G.orders,
     epi: G.epi ? [G.epi.name, [...G.epi.infected]] : null,
   };
   const sig = JSON.stringify(serWars());
-  if (sig !== MP.warsSig) { MP.warsSig = sig; st.wars = JSON.parse(sig); }
+  if (forceWars || sig !== MP.warsSig) { MP.warsSig = sig; st.wars = JSON.parse(sig); }
   return st;
+}
+function broadcastState() {
+  const st = serState(false);
+  for (const g of MP.guests) if (g.ready) sendTo(g, Object.assign({}, st, { you: g.pl }));
 }
 function flushCells() {
   if (!MP.cellBuf.length) return;
-  mpSend({ t: 'cells', d: new Int32Array(MP.cellBuf).buffer });
+  mpBroadcast({ t: 'cells', d: new Int32Array(MP.cellBuf).buffer });
   MP.cellBuf = [];
 }
 let mpTick = 0;
 setInterval(() => {
-  if (MP.role !== 'host' || !MP.ready || !G) return;
+  if (!MP.live || !G) return;
   flushCells();
   mpTick++;
-  if (mpTick % 2 === 0) mpSend(serState());
-  if (mpTick % 14 === 0) mpSend(serMeta(false));
+  if (mpTick % 2 === 0) broadcastState();
+  if (mpTick % 14 === 0) mpBroadcast(serMeta(false));
 }, 150);
 
 // ---------- хост ----------
-function mpStartHost() {
-  MP.role = 'host'; MP.code = mpCode();
+function mpStartHost(maxGuests) {
+  MP.role = 'host'; MP.code = mpCode(); MP.maxGuests = maxGuests; MP.waiting = true;
   const peer = MP.peer = new Peer(PEER_PREFIX + MP.code);
   hostWaitModal('Подключаемся к серверу связи…');
   peer.on('open', () => hostWaitModal());
   peer.on('error', err => {
-    if (err.type === 'unavailable-id') { try { peer.destroy(); } catch (e) {} return mpStartHost(); }
+    if (err.type === 'unavailable-id') { try { peer.destroy(); } catch (e) {} return mpStartHost(maxGuests); }
     hostWaitModal('Ошибка связи: ' + (err.type || err.message) + '. Проверьте интернет.');
   });
   peer.on('connection', conn => {
-    if (MP.conn && MP.conn.open) { conn.on('open', () => { conn.send({ t: 'full' }); setTimeout(() => conn.close(), 300); }); return; }
-    MP.conn = conn;
-    conn.on('open', () => conn.send({ t: 'hello', host: C[PL].id, hostName: C[PL].name }));
-    conn.on('data', onHostData);
+    if (MP.guests.length >= MP.maxGuests) { conn.on('open', () => { conn.send({ t: 'full' }); setTimeout(() => conn.close(), 300); }); return; }
+    const g = { conn, pl: -1, ready: false };
+    MP.guests.push(g);
+    conn.on('open', () => conn.send({ t: 'hello', host: C[PL].id, hostName: C[PL].name, taken: takenIsos() }));
+    conn.on('data', m => onHostData(g, m));
     conn.on('close', () => {
-      if (MP.conn !== conn) return;
-      MP.conn = null; MP.ready = false;
-      toast('🔌 Друг отключился. Его страной теперь управляет ИИ.', 'war');
-      MP.guestPL = -1; hudDirty = true;
+      const i = MP.guests.indexOf(g); if (i < 0) return;
+      MP.guests.splice(i, 1); mpRefresh();
+      if (g.ready) toast(`🔌 Игрок (${esc(g.pl >= 0 ? C[g.pl].name : '…')}) отключился. Его страной теперь управляет ИИ.`, 'war');
+      else if (MP.waiting) hostWaitModal();
+      hudDirty = true;
     });
   });
 }
+const takenIsos = () => humanPls().map(ix => C[ix].id);
 function hostWaitModal(note) {
-  if (MP.ready) return;
-  modal(`<h2>👥 Ждём друга</h2>
-    <p>Отправьте другу этот код. Он откроет игру, нажмёт «Играть с другом» → «Подключиться» и введёт код:</p>
+  if (!MP.waiting) return;
+  const joined = MP.guests.filter(g => g.ready);
+  const list = joined.map(g => `<div class="mp-joined">${flagTag(g.pl)} <b>${esc(C[g.pl].name)}</b> — готов</div>`).join('');
+  modal(`<h2>👥 Ждём друзей (${joined.length}/${MP.maxGuests})</h2>
+    <p>Отправьте друзьям этот код. Они откроют игру, нажмут «Играть с друзьями» → «Подключиться» и введут код:</p>
     <div class="mp-code">${MP.code}</div>
-    <p class="muted">${esc(note || 'Код активен. Время стоит на паузе, пока друг не выберет страну.')}</p>
-    <div class="actions"><button class="btn" data-a="cancel">Отменить игру по сети</button><button class="btn" data-a="copy">📋 Скопировать код</button></div>`,
+    ${list}
+    <p class="muted">${esc(note || 'Время стоит на паузе, пока все не выберут страны.')}</p>
+    <div class="actions"><button class="btn" data-a="cancel">Отменить</button><button class="btn" data-a="copy">📋 Код</button>
+    ${joined.length ? '<button class="btn" data-a="go">▶ Начать сейчас</button>' : ''}</div>`,
   { cancel: () => { mpReset(); toast('Игра по сети отменена — играете один'); renderHud(); },
-    copy: () => { try { navigator.clipboard.writeText(MP.code); } catch (e) {} hostWaitModal('Код скопирован!'); } });
+    copy: () => { try { navigator.clipboard.writeText(MP.code); } catch (e) {} hostWaitModal('Код скопирован!'); },
+    go: () => startMatch() });
 }
-function onHostData(m) {
+function startMatch() {
+  MP.waiting = false; MP.humansTotal = humanPls().length;
+  closeModal();
+  const names = MP.guests.filter(g => g.ready).map(g => C[g.pl].name).join(', ');
+  toast(`⚔ Игра началась! Игроки: <b>${esc(C[PL] ? C[PL].name : '')}</b>, <b>${esc(names)}</b>. Каждый сам за себя — побеждает последний выживший!`, 'good', humanPls());
+  hudDirty = true;
+}
+function onHostData(g, m) {
   if (!m || !G) return;
   if (m.t === 'pick') {
     const ix = isoIx[m.iso];
-    if (ix == null || ix === PL || !C[ix].alive) return mpSend({ t: 'pickFail', reason: 'Эта страна недоступна — выберите другую' });
-    MP.guestPL = ix; MP.ready = true; MP.flagSent = {}; MP.warsSig = '';
+    if (ix == null || !C[ix].alive || humanPls().includes(ix)) return sendTo(g, { t: 'pickFail', reason: 'Эта страна уже занята — выберите другую', taken: takenIsos() });
+    flushCells(); // остальные друзья получают накопленное до снимка мира
+    g.pl = ix; g.ready = true; mpRefresh();
     const diff = [];
     for (let i = 0; i < NCELL; i++) { const p = provOf[i]; if (p !== SEA && owner[i] !== provOwner0[p]) diff.push(i, owner[i]); }
-    MP.cellBuf = [];
-    mpSend({ t: 'init', iso: m.iso, meta: serMeta(true), state: serState(), cells: new Int32Array(diff).buffer });
-    closeModal();
-    showToast(`👥 Друг играет за страну <b>${esc(C[ix].name)}</b>. Цель — захватить столицу соперника!`, 'good', [ix]);
+    sendTo(g, { t: 'init', iso: m.iso, meta: serMeta(true), state: Object.assign(serState(true), { you: ix }), cells: new Int32Array(diff).buffer });
+    MP.warsSig = ''; // остальным тоже переслать войны
+    showToast(`👥 Игрок подключился и выбрал страну <b>${esc(C[ix].name)}</b>`, 'good', [ix]);
+    if (MP.waiting) { if (MP.guests.filter(x => x.ready).length >= MP.maxGuests) startMatch(); else hostWaitModal(); }
+    else MP.humansTotal = Math.max(MP.humansTotal, humanPls().length);
     hudDirty = true;
-  } else if (m.t === 'cmd' && ACTIONS[m.name] && MP.guestPL >= 0) {
-    asPlayer(MP.guestPL, () => ACTIONS[m.name](...(m.args || [])));
+  } else if (m.t === 'cmd' && ACTIONS[m.name] && g.pl >= 0) {
+    if ((m.name === 'pause' || m.name === 'speed') && MP.waiting) return;
+    asPlayer(g.pl, () => ACTIONS[m.name](...(m.args || [])));
     hudDirty = true;
   }
 }
@@ -2002,17 +2065,22 @@ function mpJoin(code) {
 }
 function onGuestData(m) {
   if (!m) return;
-  if (m.t === 'full') return mpStatus('К этой игре уже подключился другой игрок');
+  if (m.t === 'full') return mpStatus('В этой игре уже нет свободных мест');
   if (m.t === 'hello') {
-    MP.hostIso = m.host;
+    MP.taken = m.taken || [m.host];
     creativeMode = false;
     buildFlagGrid();
-    $('#screen-country h2').textContent = `Выберите страну · друг играет за: ${m.hostName}`;
+    $('#screen-country h2').textContent = `Выберите страну · хост играет за: ${m.hostName}`;
     $('#screen-country [data-back]').dataset.back = 'screen-mp';
     show('screen-country');
     return;
   }
-  if (m.t === 'pickFail') return toast(m.reason, 'war');
+  if (m.t === 'pickFail') {
+    MP.taken = m.taken || MP.taken;
+    $$('.flag-card').forEach(card => card.classList.toggle('taken', MP.taken.includes(card.dataset.iso)));
+    $('#screen-country h2').textContent = 'Эта страна занята — выберите другую';
+    return showToast(m.reason, 'war');
+  }
   if (m.t === 'init') return guestStart(m);
   if (!G) return;
   if (m.t === 'cells') {
@@ -2024,9 +2092,13 @@ function onGuestData(m) {
   else if (m.t === 'modal') modal(m.html);
   else if (m.t === 'ping') ping(m.xy, m.color, m.icon);
   else if (m.t === 'peaceOffer') modal(`<h2>🕊 Предложение мира</h2><div class="center">${flagTag(m.fromIx, 'big')}</div>
-      <p>Друг (<b>${esc(m.from)}</b>) предлагает заключить мир.</p>
+      <p>Игрок (<b>${esc(m.from)}</b>) предлагает заключить мир.</p>
       <div class="actions"><button class="btn" data-a="no">Отказать</button><button class="btn" data-a="yes">Заключить мир</button></div>`,
     { yes: () => act('peaceAnswer', m.id, true), no: () => act('peaceAnswer', m.id, false) });
+  else if (m.t === 'allianceOffer') modal(`<h2>🤝 Предложение союза</h2><div class="center">${flagTag(m.fromIx, 'big')}</div>
+      <p>Игрок (<b>${esc(m.from)}</b>) предлагает военный союз против остальных.</p>
+      <div class="actions"><button class="btn" data-a="no">Отказать</button><button class="btn" data-a="yes">Принять союз</button></div>`,
+    { yes: () => act('allianceAnswer', m.fromIx, true), no: () => act('allianceAnswer', m.fromIx, false) });
   else if (m.t === 'gameover') gameOverModal(m.win);
 }
 function guestSetOwner(i, n) {
@@ -2065,13 +2137,11 @@ function applyState(m) {
   for (let i = 0; i < m.n; i++) {
     const c = C[i], b = i * W1;
     NUMF.forEach((f, k) => (c[f] = num[b + k]));
-    const alive = num[b + NUMF.length] === 1;
-    if (c.alive && !alive && i === PL) { /* наша страна пала — придёт gameover */ }
-    c.alive = alive;
+    c.alive = num[b + NUMF.length] === 1;
   }
-  const newPL = m.guestPL;
+  const newPL = m.you;
   if (newPL !== PL) { if (newPL < 0 && PL >= 0) G.watching = PL; PL = newPL; recolorAll(); }
-  MP.hostPL = m.hostPL;
+  MP.humans = m.humans || [];
   G.flights = m.flights.map(([by, from, to, target, kind, t]) => ({ by, from, to, target, kind, t }));
   G.orders = m.orders || {};
   G.epi = m.epi ? { name: m.epi[0], infected: new Set(m.epi[1]) } : null;
@@ -2085,7 +2155,6 @@ function guestStart(m) {
   const d = new Int32Array(asBuf(m.cells));
   for (let k = 0; k < d.length; k += 2) owner[d[k]] = d[k + 1];
   applyState(m.state);
-  if (!m.state.wars) warsChanged();
   recolorAll();
   hideOverlays(); setMode(null); closeModal();
   toastBox.innerHTML = '';
@@ -2094,38 +2163,40 @@ function guestStart(m) {
   renderHud();
   d3.select(cv).call(zoom.transform, d3.zoomIdentity);
   setTimeout(() => focusCountry(PL), 100);
-  showToast(`👥 Вы играете за страну <b>${esc(C[PL].name)}</b> против друга (${esc(C[MP.hostPL] ? C[MP.hostPL].name : '')}). Захватите его столицу!`, 'good', [PL]);
+  const others = MP.humans.filter(h => h !== PL).map(h => C[h].name).join(', ');
+  showToast(`👥 Вы играете за страну <b>${esc(C[PL].name)}</b>. Соперники: ${esc(others)}. Каждый сам за себя!`, 'good', [PL]);
+  if (m.state.paused) showToast('⏳ Ждём остальных игроков — время пока стоит');
 }
 function gameOverModal(win) {
-  modal(win ? `<h2>🏆 Победа!</h2><p>Страна вашего друга пала. Вы победили!</p>
+  modal(win ? `<h2>🏆 Победа!</h2><p>Все соперники пали. Вы — последний выживший игрок!</p>
       <div class="actions"><button class="btn" data-a="menu">В главное меню</button><button class="btn" data-a="ok">Продолжить</button></div>`
-    : `<h2>💀 Поражение</h2><p>Ваша страна пала — друг победил.</p>
+    : `<h2>💀 Поражение</h2><p>Ваша страна пала. Можно наблюдать, чем закончится битва остальных.</p>
       <div class="actions"><button class="btn" data-a="menu">В главное меню</button><button class="btn" data-a="ok">Наблюдать</button></div>`, { menu: toMenu });
 }
 
 // ---------- меню ----------
 $('#btn-mp').onclick = () => { mpReset(); mpStatus(''); show('screen-mp'); setTimeout(() => $('#mp-code').focus(), 50); };
-$('#mp-host').onclick = () => {
+$$('.mp-host').forEach(b => (b.onclick = () => {
   if (typeof Peer === 'undefined') return mpStatus('Не загрузилась библиотека связи — нужен интернет');
-  mpReset(); MP.pendingHost = true; creativeMode = false; chosenDiff = 'normal';
+  mpReset(); MP.pendingHost = +b.dataset.guests; creativeMode = false; chosenDiff = 'normal';
   buildFlagGrid();
-  $('#screen-country h2').textContent = 'Игра с другом — выберите свою страну';
+  $('#screen-country h2').textContent = `Игра ${MP.pendingHost === 2 ? 'на троих' : 'на двоих'} — выберите свою страну`;
   $('#screen-country [data-back]').dataset.back = 'screen-mp';
   show('screen-country');
-};
+}));
 $('#mp-join').onclick = () => { if (typeof Peer === 'undefined') return mpStatus('Не загрузилась библиотека связи — нужен интернет'); mpJoin($('#mp-code').value); };
 $('#mp-code').onkeydown = e => { if (e.key === 'Enter') $('#mp-join').click(); };
 function onPickCountry(iso) {
   if (MP.role === 'guest') {
-    if (iso === MP.hostIso) return showToast('Эту страну уже выбрал друг', 'war');
+    if (MP.taken.includes(iso)) return showToast('Эту страну уже выбрал другой игрок', 'war');
     mpSend({ t: 'pick', iso });
-    $('#screen-country h2').textContent = 'Подключаемся к миру друга…';
+    $('#screen-country h2').textContent = 'Подключаемся к миру…';
     return;
   }
   const host = MP.pendingHost;
   if (!host && MP.role) mpReset();
   startGame(iso, chosenDiff, creativeMode);
-  if (host) { MP.pendingHost = false; mpStartHost(); }
+  if (host) { MP.pendingHost = false; mpStartHost(host); }
 }
 
 // ======================= Старт / меню =======================

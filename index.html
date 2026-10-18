@@ -15,7 +15,7 @@
     <h1>COUNTRY FAIL</h1>
     <div class="subtitle">Мир 2026</div>
     <button class="btn big" id="btn-play">Играть</button>
-    <button class="btn big" id="btn-mp">Играть с другом<small>Друг против друга по интернету</small></button>
+    <button class="btn big" id="btn-mp">Играть с друзьями<small>На двоих или на троих по интернету, каждый сам за себя</small></button>
     <button class="btn big" id="btn-creative">Творческий режим<small>Забирайте и закрашивайте страны, управляйте империей</small></button>
   </div>
 </section>
@@ -24,10 +24,14 @@
 <section id="screen-mp" class="screen">
   <div class="menu-bg"></div>
   <div class="menu-box">
-    <h2>Игра с другом</h2>
-    <div class="subtitle" style="margin-bottom:6px">друг против друга</div>
-    <button class="btn big" id="mp-host">Создать игру<small>Выберите страну и отправьте другу код</small></button>
-    <div class="mp-or">или</div>
+    <h2>Игра с друзьями</h2>
+    <div class="subtitle" style="margin-bottom:6px">каждый сам за себя</div>
+    <div class="mp-or">создать игру</div>
+    <div class="mp-hosts">
+      <button class="btn big mp-host" data-guests="1">👥 На двоих<small>вы + 1 друг</small></button>
+      <button class="btn big mp-host" data-guests="2">👥👤 На троих<small>вы + 2 друга</small></button>
+    </div>
+    <div class="mp-or">или подключиться по коду</div>
     <div class="row mp-join"><input id="mp-code" type="text" maxlength="8" placeholder="Код от друга" autocomplete="off"><button class="btn" id="mp-join">Подключиться</button></div>
     <div id="mp-status" class="mp-status"></div>
     <button class="btn link" data-back="screen-menu">← Назад</button>
