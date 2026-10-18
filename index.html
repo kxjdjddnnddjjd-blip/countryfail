@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Country Fail — Мир 2026</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- ===== Главное меню ===== -->
+<section id="screen-menu" class="screen active">
+  <div class="menu-bg"></div>
+  <div class="menu-box">
+    <h1>COUNTRY FAIL</h1>
+    <div class="subtitle">Мир 2026</div>
+    <button class="btn big" id="btn-play">Играть</button>
+    <button class="btn big" id="btn-mp">Играть с другом<small>Друг против друга по интернету</small></button>
+    <button class="btn big" id="btn-creative">Творческий режим<small>Забирайте и закрашивайте страны, управляйте империей</small></button>
+  </div>
+</section>
+
+<!-- ===== Игра с другом ===== -->
+<section id="screen-mp" class="screen">
+  <div class="menu-bg"></div>
+  <div class="menu-box">
+    <h2>Игра с другом</h2>
+    <div class="subtitle" style="margin-bottom:6px">друг против друга</div>
+    <button class="btn big" id="mp-host">Создать игру<small>Выберите страну и отправьте другу код</small></button>
+    <div class="mp-or">или</div>
+    <div class="row mp-join"><input id="mp-code" type="text" maxlength="8" placeholder="Код от друга" autocomplete="off"><button class="btn" id="mp-join">Подключиться</button></div>
+    <div id="mp-status" class="mp-status"></div>
+    <button class="btn link" data-back="screen-menu">← Назад</button>
+  </div>
+</section>
+
+<!-- ===== Выбор сложности ===== -->
+<section id="screen-diff" class="screen">
+  <div class="menu-bg"></div>
+  <div class="menu-box">
+    <h2>Сложность</h2>
+    <button class="btn big diff" data-diff="easy">Лёгкая<small>Ваша армия сильнее, враги слабее</small></button>
+    <button class="btn big diff" data-diff="normal">Нормальная<small>Как в реальности</small></button>
+    <button class="btn big diff" data-diff="hard">Сложная<small>Соседи агрессивны, армия слабее</small></button>
+    <button class="btn link" data-back="screen-menu">← Назад</button>
+  </div>
+</section>
+
+<!-- ===== Выбор страны ===== -->
+<section id="screen-country" class="screen">
+  <div class="menu-bg"></div>
+  <div class="country-pick">
+    <div class="pick-head">
+      <button class="btn link" data-back="screen-diff">← Назад</button>
+      <h2>Выберите страну</h2>
+      <input id="country-search" type="search" placeholder="Поиск страны…" autocomplete="off">
+    </div>
+    <div id="flag-grid" class="flag-grid"></div>
+  </div>
+</section>
+
+<!-- ===== Игра ===== -->
+<section id="screen-game" class="screen">
+  <canvas id="map"></canvas>
+
+  <div id="hud-country" class="hud panel">
+    <img id="hud-flag" class="flag" alt="">
+    <div class="hud-info">
+      <div id="hud-name" class="hud-name"></div>
+      <div id="hud-leader" class="hud-sub"></div>
+      <div id="hud-stats" class="hud-stats"></div>
+    </div>
+  </div>
+  <div id="hud-wars" class="hud-wars"></div>
+
+  <div id="hud-right" class="hud">
+    <div class="panel time-box">
+      <button id="btn-pause" class="tbtn" title="Пауза (пробел)">❚❚</button>
+      <div id="hud-date" class="hud-date"></div>
+      <div class="speeds">
+        <button class="tbtn spd" data-spd="1">1×</button>
+        <button class="tbtn spd" data-spd="2">2×</button>
+        <button class="tbtn spd" data-spd="5">5×</button>
+        <button class="tbtn" id="btn-more" title="Точная скорость">⋯</button>
+      </div>
+      <div id="speed-pop" class="speed-pop panel hidden">
+        <div class="set-label"><span id="speed-title">Скорость времени:</span> <b id="speed-val">1×</b></div>
+        <input id="speed-range" type="range" min="0" max="1000" step="1">
+        <div class="speed-marks" id="speed-marks"><span>0.1×</span><span>1×</span><span>10×</span><span>100×</span></div>
+        <div id="speed-presets" class="speed-presets hidden">
+          <button class="tbtn" data-years="1">1 год/с</button><button class="tbtn" data-years="100">100 лет/с</button>
+          <button class="tbtn" data-years="1000">1000 лет/с</button><button class="tbtn" data-years="1000000" title="Видно, как двигаются материки">🌍 1 млн лет/с</button>
+        </div>
+      </div>
+    </div>
+    <button id="btn-settings" class="btn">⚙ Настроить страну</button>
+  </div>
+
+  <div id="mode-banner" class="mode-banner hidden"></div>
+  <div id="globe-hint" class="globe-hint hidden">🌍 Тяните мышью, чтобы вращать Землю · колёсико вперёд — вернуться к карте</div>
+  <div id="popup" class="popup hidden"></div>
+  <div id="ctx" class="ctx hidden"></div>
+  <div id="toasts" class="toasts"></div>
+</section>
+
+<!-- ===== Модальное окно ===== -->
+<div id="modal" class="modal hidden">
+  <div class="modal-card" id="modal-card"></div>
+</div>
+
+<!-- ===== Настройки страны ===== -->
+<div id="settings" class="modal hidden">
+  <div class="modal-card settings-card">
+    <div class="settings-head">
+      <h2>Настройка страны</h2>
+      <button class="xbtn" id="settings-close">✕</button>
+    </div>
+    <div class="settings-body">
+      <div class="set-block">
+        <div class="set-label">Флаг</div>
+        <div class="flag-edit">
+          <img id="set-flag" class="flag big" alt="">
+          <div class="flag-actions">
+            <label class="btn small">📁 Загрузить с компьютера
+              <input type="file" id="set-flag-file" accept="image/*" hidden>
+            </label>
+            <div class="row">
+              <input id="set-flag-url" type="url" placeholder="Ссылка на картинку из интернета">
+              <button class="btn small" id="set-flag-url-btn">Применить</button>
+            </div>
+            <button class="btn small ghost" id="set-flag-random">🎲 Случайный флаг</button>
+          </div>
+        </div>
+      </div>
+      <div class="set-block">
+        <div class="set-label">Название</div>
+        <div class="row">
+          <input id="set-name" type="text" maxlength="40">
+          <button class="btn small" id="set-name-btn">Изменить</button>
+        </div>
+      </div>
+      <div class="set-block">
+        <div class="set-label">Валюта <span id="set-cur-now" class="muted"></span></div>
+        <div class="row">
+          <input id="set-cur" type="text" list="cur-list" maxlength="40" placeholder="Например: английский рубль">
+          <datalist id="cur-list"></datalist>
+          <button class="btn small" id="set-cur-btn">Изменить</button>
+        </div>
+      </div>
+      <div class="set-block">
+        <div class="set-label">Цвет на карте</div>
+        <input id="set-color" type="color">
+      </div>
+    </div>
+    <div class="settings-foot">
+      <button class="btn danger" id="btn-leave">🚪 Покинуть страну</button>
+    </div>
+  </div>
+</div>
+
+<script src="lib/d3.min.js"></script>
+<script src="lib/topojson-client.min.js"></script>
+<script src="lib/peerjs.min.js"></script>
+<script src="data/world.js"></script>
+<script src="js/countries.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>
