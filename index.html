@@ -13,7 +13,11 @@
   <div class="menu-bg"></div>
   <div class="menu-box">
     <h1>COUNTRY FAIL</h1>
-    <div class="subtitle">Мир 2026</div>
+    <div class="subtitle" id="menu-subtitle">Мир 2026</div>
+    <div class="era-switch">
+      <button class="era-btn on" data-era="2026">🌍 2026<small>наши дни</small></button>
+      <button class="era-btn" data-era="1941">🎖 1941<small>Вторая мировая</small></button>
+    </div>
     <button class="btn big" id="btn-play">Играть</button>
     <button class="btn big" id="btn-mp">Играть с друзьями<small>На двоих или на троих по интернету, каждый сам за себя</small></button>
     <button class="btn big" id="btn-creative">Творческий режим<small>Забирайте и закрашивайте страны, управляйте империей</small></button>
@@ -167,6 +171,7 @@
 <script src="lib/peerjs.min.js"></script>
 <script src="data/world.js"></script>
 <script src="js/countries.js"></script>
+<script src="js/era1941.js"></script>
 <script src="js/game.js"></script>
 </body>
 </html>

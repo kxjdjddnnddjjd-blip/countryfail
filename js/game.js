@@ -17,6 +17,13 @@ $('#btn-play').onclick = () => { creativeMode = false; show('screen-diff'); };
 $('#btn-creative').onclick = () => { creativeMode = true; chosenDiff = 'normal'; buildFlagGrid(); show('screen-country'); };
 $$('[data-back]').forEach(b => (b.onclick = () => show(b.dataset.back)));
 let chosenDiff = 'normal';
+let selectedEra = 2026, gridEra = null;
+$$('.era-btn').forEach(b => (b.onclick = () => {
+  selectedEra = +b.dataset.era;
+  $$('.era-btn').forEach(x => x.classList.toggle('on', x === b));
+  $('#menu-subtitle').textContent = selectedEra === 1941 ? 'Мир 1941 · Вторая мировая' : 'Мир 2026';
+  document.body.classList.toggle('era-1941', selectedEra === 1941);
+}));
 $$('.diff').forEach(b => (b.onclick = () => { chosenDiff = b.dataset.diff; buildFlagGrid(); show('screen-country'); }));
 
 const flagUrl = iso => `https://flagcdn.com/w160/${iso.toLowerCase()}.png`;
@@ -27,16 +34,18 @@ function setFlagImg(img, c) {
 
 function buildFlagGrid() {
   const grid = $('#flag-grid');
+  if (gridEra !== selectedEra) { grid.innerHTML = ''; gridEra = selectedEra; }
   if (!grid.childElementCount) {
-    const list = Object.entries(W.countries).sort((a, b) => a[1].name.localeCompare(b[1].name, 'ru'));
+    setupEra(selectedEra);
+    const list = ERA ? eraCountryList() : Object.entries(W.countries).sort((a, b) => a[1].name.localeCompare(b[1].name, 'ru'));
     for (const [iso, c] of list) {
       const card = document.createElement('div');
       card.className = 'flag-card';
       card.dataset.q = (c.name + ' ' + c.en).toLowerCase();
       card.dataset.iso = iso;
-      card.innerHTML = `<img class="flag" loading="lazy" alt=""><div class="name"></div><div class="meta">${fmtPop(c.pop)}</div>`;
+      card.innerHTML = `<img class="flag" loading="lazy" alt=""><div class="name"></div><div class="meta">${c.side || fmtPop(c.pop)}</div>`;
       card.querySelector('.name').textContent = c.name;
-      setFlagImg(card.querySelector('img'), { id: iso, flag: flagUrl(iso) });
+      setFlagImg(card.querySelector('img'), { id: iso, flag: ERA ? eraFlag(iso) : flagUrl(iso) });
       card.onclick = () => onPickCountry(iso);
       grid.appendChild(card);
     }
@@ -47,6 +56,20 @@ function buildFlagGrid() {
   filterGrid('');
   $$('.flag-card').forEach(card => card.classList.toggle('taken', MP.role === 'guest' && MP.taken.includes(card.dataset.iso)));
   setTimeout(() => $('#country-search').focus(), 50);
+}
+// список стран 1941 года: сначала великие державы, с пометкой стороны в войне
+function eraCountryList() {
+  const pop = {};
+  P.forEach((p, i) => { const o = ISO[provOwner0[i]]; pop[o] = (pop[o] || 0) + provDens[i] * provCount[i]; });
+  const side = id => {
+    for (const w of ERA.wars) { if (w.a.split(' ').includes(id)) return id === 'SU' ? '' : '⚔ Ось'; if (w.b.split(' ').includes(id)) return id === 'SU' ? '☭ СССР' : '⚔ Союзники'; }
+    return ERA.alliances.some(a => a.members.split(' ').includes(id)) ? 'Ось · не воюет' : 'нейтралитет';
+  };
+  const big = ['DE', 'SU', 'GB', 'US', 'JP', 'IT', 'CN', 'VF', 'FF'];
+  return ISO.map(id => {
+    const e = ERA.countries[id], m = W.countries[id];
+    return [id, { name: e.name || (m ? m.name : id), pop: pop[id] || 0, side: (side(id) || '☭ СССР') + ' · ' + fmtPop(pop[id] || 0) }];
+  }).sort((a, b) => (big.indexOf(b[0]) >= 0) - (big.indexOf(a[0]) >= 0) || (big.indexOf(a[0]) - big.indexOf(b[0])) || a[1].name.localeCompare(b[1].name, 'ru'));
 }
 function filterGrid(q) { q = q.trim().toLowerCase(); $$('.flag-card').forEach(c => (c.style.display = !q || c.dataset.q.includes(q) ? '' : 'none')); }
 $('#country-search').oninput = e => filterGrid(e.target.value);
@@ -84,10 +107,12 @@ const VW = 2000, VH = 1040, RS = 1.5, RW = VW * RS, RH = VH * RS, NCELL = RW * R
 const projection = d3.geoNaturalEarth1().fitExtent([[10, 10], [VW - 10, VH - 10]], { type: 'Sphere' });
 const P = W.provinces, NP = P.length;
 const features = topojson.feature(W.topo, W.topo.objects.p).features;
-const ISO = Object.keys(W.countries);
-const isoIx = Object.fromEntries(ISO.map((k, i) => [k, i]));
-const provCore = Uint16Array.from(P, p => isoIx[p.core]);
-const provOwner0 = Uint16Array.from(P, p => isoIx[p.owner]);
+// Эпоха: null — 2026 год, иначе данные мира другого года (например, ERA1941)
+let ERA = null;
+let ISO = Object.keys(W.countries);
+let isoIx = Object.fromEntries(ISO.map((k, i) => [k, i]));
+let provCore = Uint16Array.from(P, p => isoIx[p.core]);
+let provOwner0 = Uint16Array.from(P, p => isoIx[p.owner]);
 const provXY = P.map((p, i) => projection([p.lon, p.lat]) || d3.geoPath(projection).centroid(features[i]));
 
 const provOf = new Uint16Array(NCELL).fill(SEA);
@@ -143,7 +168,38 @@ const provStart = new Int32Array(NP + 1);
 for (let p = 0; p < NP; p++) provStart[p + 1] = provStart[p] + provCount[p];
 const provCells = new Int32Array(provStart[NP]);
 { const fillPos = provStart.slice(0, NP); for (let i = 0; i < NCELL; i++) if (provOf[i] !== SEA) provCells[fillPos[provOf[i]]++] = i; }
-const provDens = Float64Array.from(P, (p, i) => p.pop / Math.max(1, provCount[i]));
+const provDens0 = Float64Array.from(P, (p, i) => p.pop / Math.max(1, provCount[i]));
+let provDens = provDens0.slice();
+const eraFlags = {};
+function eraFlag(id) {
+  const f = ERA.countries[id].flag;
+  if (typeof f === 'string') return flagUrl(f.replace('cdn:', ''));
+  return eraFlags[id] || (eraFlags[id] = ERA.draw(f));
+}
+// справочник союзов, войн и т.п. для текущей эпохи
+const EM = () => ERA || META;
+function setupEra(era) {
+  ERA = era === 1941 ? window.ERA1941 : null;
+  if (!ERA) {
+    ISO = Object.keys(W.countries);
+    isoIx = Object.fromEntries(ISO.map((k, i) => [k, i]));
+    provCore = Uint16Array.from(P, p => isoIx[p.core]);
+    provOwner0 = Uint16Array.from(P, p => isoIx[p.owner]);
+    provDens = provDens0.slice();
+  } else {
+    ISO = Object.keys(ERA.countries);
+    isoIx = Object.fromEntries(ISO.map((k, i) => [k, i]));
+    provCore = new Uint16Array(NP); provOwner0 = new Uint16Array(NP);
+    provDens = new Float64Array(NP);
+    P.forEach((p, i) => {
+      const [o, c] = ERA.ownerCore(p);
+      provOwner0[i] = isoIx[o]; provCore[i] = isoIx[c];
+      const m = W.countries[p.core];
+      provDens[i] = provDens0[i] * (ERA.popScale[m && m.cont] || 0.3);
+    });
+  }
+  FRIENDS = new Set(EM().friends.flatMap(([a, b]) => [a + b, b + a]));
+}
 
 // векторные слои (контуры) для красоты
 const spherePath = new Path2D(); d3.geoPath(projection, spherePath)({ type: 'Sphere' });
@@ -209,14 +265,22 @@ function makeCountry(o) {
   return c;
 }
 
-function newGame(iso, diff, creative) {
+function newGame(iso, diff, creative, era) {
+  setupEra(era);
   C = [];
   for (const id of ISO) {
     const m = W.countries[id];
-    const basePower = (Math.sqrt(m.gdp) + Math.sqrt(m.pop / 1000) * 0.5) * (META.military[id] || 1);
-    makeCountry({ id, name: m.name, flag: flagUrl(id), color: baseColor(id, m.color), cont: m.cont,
-      leader: META.leaders[id] || null, currency: META.currencyName(META.currency[id] || 'USD'),
-      pc: basePower / Math.max(m.pop, 1), gdpPc: m.gdp * 1e6 / Math.max(m.pop, 1), capProv: m.cap == null ? -1 : m.cap });
+    if (!ERA) {
+      const basePower = (Math.sqrt(m.gdp) + Math.sqrt(m.pop / 1000) * 0.5) * (META.military[id] || 1);
+      makeCountry({ id, name: m.name, flag: flagUrl(id), color: baseColor(id, m.color), cont: m.cont,
+        leader: META.leaders[id] || null, currency: META.currencyName(META.currency[id] || 'USD'),
+        pc: basePower / Math.max(m.pop, 1), gdpPc: m.gdp * 1e6 / Math.max(m.pop, 1), capProv: m.cap == null ? -1 : m.cap });
+    } else {
+      const e = ERA.countries[id];
+      makeCountry({ id, name: e.name || (m ? m.name : id), flag: eraFlag(id), color: e.color || baseColor(id, m ? m.color : 1),
+        cont: m ? m.cont : 'Europe', leader: e.leader || null,
+        currency: e.currency || (META.currency[id] ? META.currencyName(META.currency[id]) : 'местная валюта'), pc: 0, gdpPc: 0 });
+    }
   }
   for (let i = 0; i < NCELL; i++) {
     const p = provOf[i];
@@ -224,16 +288,33 @@ function newGame(iso, diff, creative) {
     const o = provOwner0[p]; owner[i] = o; C[o].cells++; C[o].pop += provDens[p];
   }
   for (let p = 0; p < NP; p++) C[owner[cityCell[p]]].cities++;
+  if (ERA) for (const c of C) {
+    // сила армий и экономика 1941 года; столица — по истории или крупнейший город
+    const e = ERA.countries[c.id], m = W.countries[c.id], pop = Math.max(c.pop, 1);
+    const power = e.power != null ? e.power : m ? (Math.sqrt(m.gdp) + Math.sqrt(m.pop / 1000) * 0.5) * 0.25 : 30;
+    c.pc = power / pop;
+    c.gdpPc = (e.gdp != null ? e.gdp * 1e9 : pop * 350) / pop;
+    const want = e.capital || (m && m.cap != null ? P[m.cap].name : null);
+    c.capProv = P.findIndex((p, i) => p.name === want && owner[cityCell[i]] === c.ix);
+    if (c.capProv < 0) relocateCapital(c.ix);
+    if (c.capProv >= 0) { const cm = W.countries[P[c.capProv].core]; if (cm) c.cont = cm.cont; }
+  }
   PL = isoIx[iso];
-  G = { diff, D: DIFF[diff], day: new Date(2026, 0, 1), dayN: 0, paused: false, speed: 1, growth: 1, watching: PL,
+  G = { diff, D: DIFF[diff], day: ERA ? new Date(...ERA.start) : new Date(2026, 0, 1), dayN: 0, era: ERA ? 1941 : 2026, paused: false, speed: 1, growth: 1, watching: PL,
     wars: [], alliances: [], newId: 1, mode: null, flights: [], strikes: [], pings: [], arrows: [], orders: {}, epi: null,
     pendingCap: [], modalPause: false, cityToast: {}, creative: !!creative, pmax: 1 };
-  for (const a of META.alliances) G.alliances.push({ name: a.name, members: new Set(a.members.map(m => isoIx[m]).filter(m => m != null)) });
-  for (const [k, list] of Object.entries(META.aid)) for (const s of list) if (isoIx[s] != null) C[isoIx[k]].aidFrom.add(isoIx[s]);
+  const mems = x => (Array.isArray(x) ? x : x.split(' ')).map(m => isoIx[m]).filter(m => m != null);
+  for (const a of EM().alliances) G.alliances.push({ name: a.name, members: new Set(mems(a.members)) });
+  for (const [k, list] of Object.entries(EM().aid)) for (const s of list) if (isoIx[s] != null && isoIx[k] != null) C[isoIx[k]].aidFrom.add(isoIx[s]);
   for (const c of C) c.warBase = c.cells;
   for (const c of C) G.pmax = Math.max(G.pmax, power0(c));
-  const w = makeWar(isoIx.RU, isoIx.UA, 'Российско-украинская война');
-  G.wars.push(w);
+  if (!ERA) G.wars.push(makeWar(isoIx.RU, isoIx.UA, 'Российско-украинская война'));
+  else for (const ws of ERA.wars) {
+    const a = mems(ws.a), b = mems(ws.b);
+    const w = makeWar(a[0], b[0], ws.name);
+    a.forEach(x => w.sides[0].add(x)); b.forEach(x => w.sides[1].add(x));
+    G.wars.push(w);
+  }
   warsChanged();
   updateAid();
 }
@@ -346,14 +427,14 @@ function makeWar(a, b, name) {
 }
 const atWar = (a, b) => a >= 0 && b >= 0 && !!enemyM[a * CAP + b];
 const allied = (a, b) => a !== b && G.alliances.some(al => al.members.has(a) && al.members.has(b));
-const FRIENDS = new Set(META.friends.flatMap(([a, b]) => [a + b, b + a]));
+let FRIENDS = new Set(META.friends.flatMap(([a, b]) => [a + b, b + a]));
 const friendly = (a, b) => allied(a, b) || FRIENDS.has(C[a].id + C[b].id) || C[a].aidFrom.has(b) || C[b].aidFrom.has(a);
 const alliancesOf = ix => G.alliances.filter(al => al.members.has(ix));
 function inWar(w, ix) { return w.sides[0].has(ix) ? 0 : w.sides[1].has(ix) ? 1 : -1; }
 function warsOf(ix) { return G.wars.filter(w => inWar(w, ix) >= 0); }
 function rivalsBloc(a, b) {
   const na = alliancesOf(a).map(x => x.name), nb = alliancesOf(b).map(x => x.name);
-  return META.rivals.some(([x, y]) => (na.includes(x) && nb.includes(y)) || (na.includes(y) && nb.includes(x)));
+  return EM().rivals.some(([x, y]) => (na.includes(x) && nb.includes(y)) || (na.includes(y) && nb.includes(x)));
 }
 
 function warsChanged() {
@@ -778,7 +859,7 @@ function worldEvents() {
   }
   // Конфликты в горячих точках
   if (chance(1 / 260)) {
-    const pairs = META.tensions.map(([a, b]) => [isoIx[a], isoIx[b]]).filter(([a, b]) => a != null && b != null && C[a].alive && C[b].alive && !atWar(a, b) && !isHuman(a) && !isHuman(b));
+    const pairs = EM().tensions.map(([a, b]) => [isoIx[a], isoIx[b]]).filter(([a, b]) => a != null && b != null && C[a].alive && C[b].alive && !atWar(a, b) && !isHuman(a) && !isHuman(b));
     if (pairs.length) { const [a, b] = rnd(pairs); declareWar(a, b); }
   }
 }
@@ -817,7 +898,7 @@ function proposeAlliance(t) {
 function formAlliance(t) {
   let al = G.alliances.find(a => a.mine) || alliancesOf(PL)[0];
   if (!al) { al = { name: 'Союз ' + C[PL].name, members: new Set([PL]), mine: true }; G.alliances.push(al); }
-  for (const a of alliancesOf(t)) if (META.rivals.some(([x, y]) => (x === a.name && alliancesOf(PL).some(b => b.name === y)) || (y === a.name && alliancesOf(PL).some(b => b.name === x)))) a.members.delete(t);
+  for (const a of alliancesOf(t)) if (EM().rivals.some(([x, y]) => (x === a.name && alliancesOf(PL).some(b => b.name === y)) || (y === a.name && alliancesOf(PL).some(b => b.name === x)))) a.members.delete(t);
   al.members.add(t);
   toast(`🤝 <b>${esc(C[t].name)}</b> вступила в союз «${esc(al.name)}»!`, 'good', [t, PL]);
   // новый союзник вступает в наши войны
@@ -1984,7 +2065,7 @@ function mpStartHost(maxGuests) {
     if (MP.guests.length >= MP.maxGuests) { conn.on('open', () => { conn.send({ t: 'full' }); setTimeout(() => conn.close(), 300); }); return; }
     const g = { conn, pl: -1, ready: false };
     MP.guests.push(g);
-    conn.on('open', () => conn.send({ t: 'hello', host: C[PL].id, hostName: C[PL].name, taken: takenIsos() }));
+    conn.on('open', () => conn.send({ t: 'hello', host: C[PL].id, hostName: C[PL].name, taken: takenIsos(), era: G.era }));
     conn.on('data', m => onHostData(g, m));
     conn.on('close', () => {
       const i = MP.guests.indexOf(g); if (i < 0) return;
@@ -2027,7 +2108,7 @@ function onHostData(g, m) {
     g.pl = ix; g.ready = true; mpRefresh();
     const diff = [];
     for (let i = 0; i < NCELL; i++) { const p = provOf[i]; if (p !== SEA && owner[i] !== provOwner0[p]) diff.push(i, owner[i]); }
-    sendTo(g, { t: 'init', iso: m.iso, meta: serMeta(true), state: Object.assign(serState(true), { you: ix }), cells: new Int32Array(diff).buffer });
+    sendTo(g, { t: 'init', iso: m.iso, era: G.era, meta: serMeta(true), state: Object.assign(serState(true), { you: ix }), cells: new Int32Array(diff).buffer });
     MP.warsSig = ''; // остальным тоже переслать войны
     showToast(`👥 Игрок подключился и выбрал страну <b>${esc(C[ix].name)}</b>`, 'good', [ix]);
     if (MP.waiting) { if (MP.guests.filter(x => x.ready).length >= MP.maxGuests) startMatch(); else hostWaitModal(); }
@@ -2069,6 +2150,7 @@ function onGuestData(m) {
   if (m.t === 'hello') {
     MP.taken = m.taken || [m.host];
     creativeMode = false;
+    selectedEra = m.era || 2026;
     buildFlagGrid();
     $('#screen-country h2').textContent = `Выберите страну · хост играет за: ${m.hostName}`;
     $('#screen-country [data-back]').dataset.back = 'screen-mp';
@@ -2149,7 +2231,7 @@ function applyState(m) {
   hudDirty = true;
 }
 function guestStart(m) {
-  newGame(m.iso, 'normal', false);
+  newGame(m.iso, 'normal', false, m.era || 2026);
   G.wars = [];
   applyMeta(m.meta);
   const d = new Int32Array(asBuf(m.cells));
@@ -2195,15 +2277,15 @@ function onPickCountry(iso) {
   }
   const host = MP.pendingHost;
   if (!host && MP.role) mpReset();
-  startGame(iso, chosenDiff, creativeMode);
+  startGame(iso, chosenDiff, creativeMode, selectedEra);
   if (host) { MP.pendingHost = false; mpStartHost(host); }
 }
 
 // ======================= Старт / меню =======================
-function startGame(iso, diff, creative) {
+function startGame(iso, diff, creative, era) {
   if (G && G.paint) stopPaint();
   if (globe.on) exitGlobe(true);
-  newGame(iso, diff, creative);
+  newGame(iso, diff, creative, era);
   hideOverlays(); setMode(null); closeModal();
   $('#speed-pop').classList.add('hidden');
   toastBox.innerHTML = '';
@@ -2213,6 +2295,7 @@ function startGame(iso, diff, creative) {
   d3.select(cv).call(zoom.transform, d3.zoomIdentity);
   setTimeout(() => focusCountry(PL), 100);
   say(`Вы управляете страной <b>${esc(C[PL].name)}</b>. 1 секунда = 1 день. Пробел — пауза.`, 'good', [PL]);
+  if (ERA) setTimeout(() => say('🎖 22 июня 1941 года. Германия и её союзники напали на СССР, Британия сражается с Осью, Япония воюет в Китае, США пока нейтральны.', 'war'), 600);
   setTimeout(() => say('ЛКМ — информация и независимость. ПКМ по своей стране — война, по чужой — союз, по врагу — наступление, авиаудар, десант.'), 1200);
   if (creative) setTimeout(() => say('Творческий режим: ПКМ по стране — забрать, закрашивать, вассал, сила. ⋯ у времени — скорость до 100×.', 'good'), 2400);
   setTimeout(() => say('Отдалите карту колёсиком до упора — карта превратится в глобус.'), 3600);
