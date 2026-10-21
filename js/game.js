@@ -1904,7 +1904,8 @@ function mpReset() {
   try { MP.conn && MP.conn.close(); } catch (e) {}
   for (const g of MP.guests) try { g.conn.close(); } catch (e) {}
   try { MP.peer && MP.peer.destroy(); } catch (e) {}
-  Object.assign(MP, { role: null, peer: null, conn: null, code: '', guests: [], maxGuests: 1, humans: [], cellBuf: [], warsSig: '',
+  try { if (MP.relayWs) { MP.relayWs.onclose = null; MP.relayWs.close(); } } catch (e) {}
+  Object.assign(MP, { relayWs: null, relayOk: false, p2pOk: false, via: '', role: null, peer: null, conn: null, code: '', guests: [], maxGuests: 1, humans: [], cellBuf: [], warsSig: '',
     flagSent: {}, pendingHost: false, live: false, waiting: false, taken: [], humansTotal: 0 });
 }
 const mpStatus = t => ($('#mp-status').textContent = t);
@@ -2052,29 +2053,98 @@ setInterval(() => {
 }, 150);
 
 // ---------- хост ----------
+// ---------- запасной канал: сервер-посредник (если браузеры не соединились напрямую) ----------
+const LOCAL = /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
+const RELAY_WS = LOCAL ? 'ws://localhost:10555' : 'wss://countryfail-relay.onrender.com';
+const RELAY_HTTP = RELAY_WS.replace(/^ws/, 'http');
+const FORCE_RELAY = /[?&]relay=1/.test(location.search); // для проверки: сразу через сервер
+function wakeRelay() { try { fetch(RELAY_HTTP + '/', { mode: 'cors' }).catch(() => {}); } catch (e) {} }
+function b64e(buf) { const u = new Uint8Array(buf); let r = ''; for (let i = 0; i < u.length; i += 0x8000) r += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(r); }
+function b64d(str) { const r = atob(str), u = new Uint8Array(r.length); for (let i = 0; i < r.length; i++) u[i] = r.charCodeAt(i); return u.buffer; }
+const relayEnc = m => JSON.stringify(m, (k, v) => (v instanceof ArrayBuffer ? { __b: b64e(v) } : ArrayBuffer.isView(v) ? { __b: b64e(asBuf(v)) } : v));
+const relayDec = t => JSON.parse(t, (k, v) => (v && typeof v === 'object' && typeof v.__b === 'string' ? b64d(v.__b) : v));
+// соединение с тем же интерфейсом, что у PeerJS: on('open'|'data'|'close'), send(), close(), open
+function mkConn(sendText, closeFn) {
+  const h = {};
+  const c = { open: false, relay: true,
+    on(ev, f) { (h[ev] = h[ev] || []).push(f); return c; },
+    emit(ev, x) { (h[ev] || []).slice().forEach(f => f(x)); },
+    send(m) { sendText(relayEnc(m)); },
+    close() { closeFn(); } };
+  return c;
+}
+function relayHost(code, onConn) {
+  if (MP.relayWs) try { MP.relayWs.onclose = null; MP.relayWs.close(); } catch (e) {}
+  const ws = MP.relayWs = new WebSocket(`${RELAY_WS}/?room=${code}&role=host`);
+  const conns = new Map();
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.ev === 'hosting') { MP.relayOk = true; hostWaitModal(); }
+    else if (m.ev === 'join') {
+      const c = mkConn(t => ws.readyState === 1 && ws.send(JSON.stringify({ to: m.id, m: t })), () => ws.readyState === 1 && ws.send(JSON.stringify({ kick: m.id })));
+      c.open = true; conns.set(m.id, c); onConn(c);
+      setTimeout(() => c.emit('open'), 0);
+    } else if (m.ev === 'leave') {
+      const c = conns.get(m.id);
+      if (c) { c.open = false; conns.delete(m.id); c.emit('close'); }
+    } else if (m.from) {
+      const c = conns.get(m.from);
+      if (c) c.emit('data', relayDec(m.m));
+    }
+  };
+  ws.onclose = () => {
+    MP.relayOk = false;
+    for (const c of conns.values()) { c.open = false; c.emit('close'); }
+    conns.clear();
+    // сервер перезапустился или проснулся — переподключаемся, пока игра по сети активна
+    if (MP.role === 'host' && MP.code === code) setTimeout(() => { if (MP.role === 'host' && MP.code === code) relayHost(code, onConn); }, 3000);
+  };
+}
+function relayGuest(code) {
+  const ws = new WebSocket(`${RELAY_WS}/?room=${code}&role=guest`);
+  const c = mkConn(t => ws.readyState === 1 && ws.send(t), () => ws.close());
+  ws.onmessage = e => {
+    const t = e.data;
+    if (t.startsWith('{"ev"')) {
+      const m = JSON.parse(t);
+      if (m.ev === 'ready') { c.open = true; c.emit('open'); }
+      else c.emit('fail', m.ev);
+      return;
+    }
+    c.emit('data', relayDec(t));
+  };
+  ws.onerror = () => c.emit('fail', 'error');
+  ws.onclose = () => { const was = c.open; c.open = false; if (was) c.emit('close'); };
+  return c;
+}
+
+function acceptGuest(conn) {
+  // занятыми считаем только места тех, кто уже выбрал страну (зависшие прямые соединения не мешают)
+  if (MP.guests.filter(x => x.ready).length >= MP.maxGuests) { conn.on('open', () => { conn.send({ t: 'full' }); setTimeout(() => conn.close(), 300); }); return; }
+  const g = { conn, pl: -1, ready: false };
+  MP.guests.push(g);
+  conn.on('open', () => conn.send({ t: 'hello', host: C[PL].id, hostName: C[PL].name, taken: takenIsos(), era: G.era }));
+  conn.on('data', m => onHostData(g, m));
+  conn.on('close', () => {
+    const i = MP.guests.indexOf(g); if (i < 0) return;
+    MP.guests.splice(i, 1); mpRefresh();
+    if (g.ready) toast(`🔌 Игрок (${esc(g.pl >= 0 ? C[g.pl].name : '…')}) отключился. Его страной теперь управляет ИИ.`, 'war');
+    else if (MP.waiting) hostWaitModal();
+    hudDirty = true;
+  });
+}
 function mpStartHost(maxGuests) {
   MP.role = 'host'; MP.code = mpCode(); MP.maxGuests = maxGuests; MP.waiting = true;
+  hostWaitModal('Подключаемся к серверу связи… (если сервер спал, это может занять до минуты)');
+  relayHost(MP.code, acceptGuest);
+  if (typeof Peer === 'undefined') return;
   const peer = MP.peer = new Peer(PEER_PREFIX + MP.code);
-  hostWaitModal('Подключаемся к серверу связи…');
-  peer.on('open', () => hostWaitModal());
+  peer.on('open', () => { MP.p2pOk = true; hostWaitModal(); });
   peer.on('error', err => {
     if (err.type === 'unavailable-id') { try { peer.destroy(); } catch (e) {} return mpStartHost(maxGuests); }
-    hostWaitModal('Ошибка связи: ' + (err.type || err.message) + '. Проверьте интернет.');
+    console.warn('PeerJS:', err.type); // не страшно — друзья подключатся через сервер-посредник
   });
-  peer.on('connection', conn => {
-    if (MP.guests.length >= MP.maxGuests) { conn.on('open', () => { conn.send({ t: 'full' }); setTimeout(() => conn.close(), 300); }); return; }
-    const g = { conn, pl: -1, ready: false };
-    MP.guests.push(g);
-    conn.on('open', () => conn.send({ t: 'hello', host: C[PL].id, hostName: C[PL].name, taken: takenIsos(), era: G.era }));
-    conn.on('data', m => onHostData(g, m));
-    conn.on('close', () => {
-      const i = MP.guests.indexOf(g); if (i < 0) return;
-      MP.guests.splice(i, 1); mpRefresh();
-      if (g.ready) toast(`🔌 Игрок (${esc(g.pl >= 0 ? C[g.pl].name : '…')}) отключился. Его страной теперь управляет ИИ.`, 'war');
-      else if (MP.waiting) hostWaitModal();
-      hudDirty = true;
-    });
-  });
+  peer.on('connection', acceptGuest);
 }
 const takenIsos = () => humanPls().map(ix => C[ix].id);
 function hostWaitModal(note) {
@@ -2086,6 +2156,7 @@ function hostWaitModal(note) {
     <div class="mp-code">${MP.code}</div>
     ${list}
     <p class="muted">${esc(note || 'Время стоит на паузе, пока все не выберут страны.')}</p>
+    <p class="muted">Связь: ${MP.p2pOk ? '✅ напрямую' : '⏳ напрямую'} · ${MP.relayOk ? '✅ через сервер' : '⏳ через сервер (просыпается)'}</p>
     <div class="actions"><button class="btn" data-a="cancel">Отменить</button><button class="btn" data-a="copy">📋 Код</button>
     ${joined.length ? '<button class="btn" data-a="go">▶ Начать сейчас</button>' : ''}</div>`,
   { cancel: () => { mpReset(); toast('Игра по сети отменена — играете один'); renderHud(); },
@@ -2104,6 +2175,7 @@ function onHostData(g, m) {
   if (m.t === 'pick') {
     const ix = isoIx[m.iso];
     if (ix == null || !C[ix].alive || humanPls().includes(ix)) return sendTo(g, { t: 'pickFail', reason: 'Эта страна уже занята — выберите другую', taken: takenIsos() });
+    if (MP.guests.filter(x => x.ready).length >= MP.maxGuests) return sendTo(g, { t: 'full' });
     flushCells(); // остальные друзья получают накопленное до снимка мира
     g.pl = ix; g.ready = true; mpRefresh();
     const diff = [];
@@ -2128,21 +2200,47 @@ function mpJoin(code) {
   mpReset();
   MP.role = 'guest'; MP.code = code;
   mpStatus('Подключаемся…');
+  let settled = false, relayStarted = false;
+  const onClose = () => {
+    if (MP.role !== 'guest') return;
+    if ($('#screen-game').classList.contains('active'))
+      modal(`<h2>🔌 Связь потеряна</h2><p>Хост закрыл игру или пропал интернет.</p><div class="actions"><button class="btn" data-a="menu">В главное меню</button></div>`, { menu: toMenu });
+    else mpStatus('Связь потеряна');
+    MP.role = null;
+  };
+  const use = (conn, how) => {
+    if (settled || MP.code !== code) { try { conn.close(); } catch (e) {} return; }
+    settled = true; MP.conn = conn; MP.via = how;
+    conn.on('data', onGuestData);
+    conn.on('close', onClose);
+    mpStatus(how === 'relay' ? 'Подключено через сервер! Ждём ответ…' : 'Подключено напрямую! Ждём ответ…');
+  };
+  const startRelay = () => {
+    if (settled || relayStarted || MP.code !== code) return;
+    relayStarted = true;
+    mpStatus('Подключаемся через сервер… (если сервер спал, это может занять до минуты)');
+    let tries = 0;
+    const attempt = () => {
+      const c = relayGuest(code);
+      c.on('open', () => use(c, 'relay'));
+      c.on('fail', why => {
+        if (settled) return;
+        if (why === 'nohost') return mpStatus('Игра с таким кодом не найдена. Проверьте код и что друг ждёт подключения.');
+        if (why === 'full') return mpStatus('В этой игре уже нет свободных мест');
+        if (++tries < 6) setTimeout(attempt, 5000); else mpStatus('Не удалось подключиться к серверу. Проверьте интернет и попробуйте ещё раз.');
+      });
+    };
+    attempt();
+  };
+  if (FORCE_RELAY || typeof Peer === 'undefined') return startRelay();
+  // сначала пробуем напрямую (быстрее), через 5 секунд — запасной канал через сервер
   const peer = MP.peer = new Peer();
   peer.on('open', () => {
-    const conn = MP.conn = peer.connect(PEER_PREFIX + code, { reliable: true });
-    const to = setTimeout(() => { if (!conn.open) mpStatus('Не удалось найти игру с таким кодом. Проверьте код и что друг ждёт подключения.'); }, 9000);
-    conn.on('open', () => { clearTimeout(to); mpStatus('Подключено! Ждём ответ…'); });
-    conn.on('data', onGuestData);
-    conn.on('close', () => {
-      if (MP.role !== 'guest') return;
-      if ($('#screen-game').classList.contains('active'))
-        modal(`<h2>🔌 Связь потеряна</h2><p>Хост закрыл игру или пропал интернет.</p><div class="actions"><button class="btn" data-a="menu">В главное меню</button></div>`, { menu: toMenu });
-      else mpStatus('Связь потеряна');
-      MP.role = null;
-    });
+    const conn = peer.connect(PEER_PREFIX + code, { reliable: true });
+    conn.on('open', () => use(conn, 'p2p'));
   });
-  peer.on('error', err => mpStatus(err.type === 'peer-unavailable' ? 'Игра с таким кодом не найдена' : 'Ошибка связи: ' + (err.type || err.message)));
+  peer.on('error', () => startRelay());
+  setTimeout(startRelay, 5000);
 }
 function onGuestData(m) {
   if (!m) return;
@@ -2257,16 +2355,15 @@ function gameOverModal(win) {
 }
 
 // ---------- меню ----------
-$('#btn-mp').onclick = () => { mpReset(); mpStatus(''); show('screen-mp'); setTimeout(() => $('#mp-code').focus(), 50); };
+$('#btn-mp').onclick = () => { mpReset(); mpStatus(''); wakeRelay(); show('screen-mp'); setTimeout(() => $('#mp-code').focus(), 50); };
 $$('.mp-host').forEach(b => (b.onclick = () => {
-  if (typeof Peer === 'undefined') return mpStatus('Не загрузилась библиотека связи — нужен интернет');
   mpReset(); MP.pendingHost = +b.dataset.guests; creativeMode = false; chosenDiff = 'normal';
   buildFlagGrid();
   $('#screen-country h2').textContent = `Игра ${MP.pendingHost === 2 ? 'на троих' : 'на двоих'} — выберите свою страну`;
   $('#screen-country [data-back]').dataset.back = 'screen-mp';
   show('screen-country');
 }));
-$('#mp-join').onclick = () => { if (typeof Peer === 'undefined') return mpStatus('Не загрузилась библиотека связи — нужен интернет'); mpJoin($('#mp-code').value); };
+$('#mp-join').onclick = () => mpJoin($('#mp-code').value);
 $('#mp-code').onkeydown = e => { if (e.key === 'Enter') $('#mp-join').click(); };
 function onPickCountry(iso) {
   if (MP.role === 'guest') {
